@@ -74,7 +74,14 @@ fun main(args: Array<String>) {
                     chuck.setSystemMessage(question)
                     return@run
                 }
-                chuck.addAnswer(getChuckAnswerAsBuffer(this, chuck, question))
+                if (question.startsWith('@')) {
+                    val temperature = question.substring(1..3).toDoubleOrNull()
+                    if (temperature != null && temperature in 0.0..2.0) {
+                        chuck.setTemperature(temperature)
+                        return@run
+                    }
+                }
+                chuck.addAnswer(getChuckAnswer(this, chuck, question))
             }
         }
     }
@@ -109,37 +116,23 @@ fun getQuestion(session: Session, chuck: Chuck, systemMode: Boolean): String {
     }
 }
 
-fun getChuckAnswerAsBuffer(session: Session, chuck: Chuck, question: String): String {
-    val bufferSize = 30
+fun getChuckAnswer(session: Session, chuck: Chuck, question: String): String {
     with(session) {
-        var currentAnswer: Chuck.Answer = Chuck.Answer()
-        var completed = false
+        var answer = ""
         section {
-            val lines = if (completed || currentAnswer.lines.count() <= bufferSize)
-                currentAnswer.lines
-            else
-                listOf("^".repeat(64)) + currentAnswer.lines.takeLast(bufferSize)
-            for (line in lines) {
-                textLine(line)
-            }
-            val cl = currentAnswer.currentLine
-            if (cl != null) {
-                text(cl)
-            }
         }.runUntilSignal {
             var cancelled = false
             CoroutineScope(Dispatchers.Default).launch {
                 try {
-                    chuck.processQuestionAsBuffer(question)
+                    chuck.processQuestion(question)
                         .takeWhile { !cancelled }
                         .collect {
-                            currentAnswer = it
-                            rerender()
+                            answer += it
+                            print(it)
                         }
-                    completed = true
                 } catch (_: Exception) {
                 }
-                rerender()
+                println('\n')
                 signal()
             }
 
@@ -151,18 +144,19 @@ fun getChuckAnswerAsBuffer(session: Session, chuck: Chuck, question: String): St
                 }
             }
         }
-        return currentAnswer.lines.joinToString(separator = "\n")
+        return answer
     }
 }
 
 fun printHelp(session: Session) {
     with(session) {
         section {
-            red { text("\tsys") }; textLine(" to set the system message")
-            red { text("\tesc") }; textLine(" to stop the answer before completion")
-            red { text("\t??") }; textLine("  to see the current conversation system message and questions")
-            red { text("\tok") }; textLine("  to start a new conversation")
-            red { text("\tbye") }; textLine(" to exit")
+            red { text("\tsys") }; textLine("  to set the system message")
+            red { text("\tesc") }; textLine("  to stop the answer before completion")
+            red { text("\t??") }; textLine("   to see the current conversation system message and questions")
+            red { text("\tok") }; textLine("   to start a new conversation")
+            red { text("\t@#.#") }; textLine(" to set a temperature. #.# is a number between 0.0 and 2.0. Default value 1.0. Higher - more random answers.")
+            red { text("\tbye") }; textLine("  to exit")
         }.run()
     }
 }
@@ -183,8 +177,9 @@ class Chuck(private val service: OpenAI, private val model: String) {
     private val history: MutableList<String> = mutableListOf()
     private var historyIdx: Int = -1
     private var systemMessage: ChatMessage? = null
+    private var temperature: Double? = null
 
-    private fun processQuestion(question: String): Flow<String> {
+    fun processQuestion(question: String): Flow<String> {
         history.add(0, question)
         conversation.add(
             ChatMessage(
@@ -195,26 +190,11 @@ class Chuck(private val service: OpenAI, private val model: String) {
         val messages = if (systemMessage == null) conversation else listOf(systemMessage!!, *conversation.toTypedArray())
         val chatCompletionRequest = ChatCompletionRequest(
             model = ModelId(model),
-            messages = messages
+            messages = messages,
+            temperature = temperature
         )
         val completion: Flow<ChatCompletionChunk> = service.chatCompletions(chatCompletionRequest)
         return completion.map { it.choices[0].delta?.content }.filterNotNull()
-    }
-
-    data class Answer(val lines: MutableList<String> = mutableListOf(), var currentLine: String? = null)
-
-    fun processQuestionAsBuffer(question: String): Flow<Answer> {
-        val answer = Answer()
-        return processQuestion(question).transform { chunk ->
-            val cl = (answer.currentLine ?: "") + chunk
-            if (cl.endsWith('\n')) {
-                answer.lines.add(cl.trimEnd('\n'))
-                answer.currentLine = null
-            } else {
-                answer.currentLine = cl
-            }
-            emit(answer)
-        }
     }
 
     fun getSystemMessage(): String {
@@ -233,8 +213,13 @@ class Chuck(private val service: OpenAI, private val model: String) {
         }
     }
 
+    fun setTemperature(value: Double) {
+        temperature = value
+    }
+
     fun clear() {
         systemMessage = null
+        temperature = null
         conversation.clear()
     }
 
@@ -260,6 +245,9 @@ class Chuck(private val service: OpenAI, private val model: String) {
         val systemMsg = systemMessage
         if (systemMsg != null) {
             state.add(0, "⚙️  " + systemMsg.content)
+        }
+        if (temperature != null) {
+            state.add(0, "🌡️️  " + temperature.toString())
         }
         return state
     }
